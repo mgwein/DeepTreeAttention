@@ -6,8 +6,9 @@ import os
 import glob
 import rasterio as rio
 from src import data
-from src.models import year
-from src.models import dead, multi_stage
+from src.models import Hang2020
+from src.models import dead
+from src import main
 from src import utils
 import tempfile
 import torch
@@ -37,7 +38,7 @@ def rgb_pool(ROOT):
 
 @pytest.fixture(scope="session")
 def rgb_path(ROOT):
-    rgb_path = "{}/tests/data/2019_D01_HARV_DP3_726000_4699000_image_crop_2019.tif".format(ROOT)
+    rgb_path = "{}/tests/data/2019_D01_HARV_DP3_726000_4699000_image_crop.tif".format(ROOT)
     
     return rgb_path
 
@@ -64,9 +65,8 @@ def config(ROOT):
     config["HSI_sensor_pool"] = "{}/tests/data/*.tif".format(ROOT)
     config["min_train_samples"] = 1
     config["min_test_samples"] = 1
-    config["crop_dir"] = "{}/tests/data/110ac77ae89043898f618466359c2a2e".format(ROOT)
-    config["data_dir"] = "{}/tests/data/".format(ROOT)
-    config["bands"] = 349
+    config["crop_dir"] = "{}/tests/data/crops/".format(ROOT)
+    config["bands"] = 3
     config["classes"] = 3
     config["top_k"] = 1
     config["convert_h5"] = False
@@ -75,42 +75,49 @@ def config(ROOT):
     config["dead_model"] = None
     config["dead_threshold"] = 0.95
     config["megaplot_dir"] = None
-    config["use_data_commit"] = "110ac77ae89043898f618466359c2a2e"
+    config["use_data_commit"] = None
     config["dead"]["epochs"] = 1
-    config["pretrain_state_dict"] = None
-    config["preload_images"] = False
-    config["batch_size"] = 2
-    config["gpus"] = 0
-    config["existing_test_csv"] = None
-    config["workers"] = 0
-    config["dead"]["num_workers"] = 0
-    config["dead"]["batch_size"] = 2
     
     return config
 
 #Data module
 @pytest.fixture(scope="session")
 def dm(config, ROOT):
-    csv_file = "{}/tests/data/110ac77ae89043898f618466359c2a2e/train.csv".format(ROOT)
-    data_module = data.TreeData(config=config, csv_file=csv_file, data_dir="{}/tests/data/110ac77ae89043898f618466359c2a2e".format(ROOT), debug=True) 
+    csv_file = "{}/tests/data/sample_neon.csv".format(ROOT)               
+    dm = data.TreeData(config=config, csv_file=csv_file, data_dir="{}/tests/data".format(ROOT), debug=True, metadata=True) 
+    dm.setup()    
     
-    return data_module
+    return dm
 
 @pytest.fixture(scope="session")
-def experiment():
+def comet_logger():
     if not "GITHUB_ACTIONS" in os.environ:
         from pytorch_lightning.loggers import CometLogger        
         COMET_KEY = os.getenv("COMET_KEY")
         comet_logger = CometLogger(api_key=COMET_KEY,
                                    project_name="DeepTreeAttention", workspace="bw4sz",auto_output_logging = "simple")
-        return comet_logger.experiment
+        return comet_logger
     else:
         return None
 
 #Training module
 @pytest.fixture(scope="session")
 def m(config, dm, ROOT):
-    m  = multi_stage.MultiStage(train_df=dm.train, test_df=dm.test, crowns=dm.crowns, config=config)    
+    model = Hang2020.spectral_network(bands=3, classes=3)
+    m = main.TreeModel(model=model, classes=3, config=config, label_dict=dm.species_label_dict, loss_weight=[0.1,0.8,1])
     m.ROOT = "{}/tests/".format(ROOT)
     
     return m
+
+#Training module
+@pytest.fixture(scope="session")
+def species_model_path(config, dm):
+    model = Hang2020.spectral_network(bands=3, classes=3)
+    m = main.TreeModel(model=model, classes=3, config=config, label_dict=dm.species_label_dict)
+    m.ROOT = "{}/tests/".format(ROOT)
+    filepath = "{}/model.pl".format(tempfile.gettempdir())
+    trainer = Trainer(fast_dev_run=True)
+    trainer.fit(m, dm)
+    trainer.save_checkpoint(filepath)
+    
+    return filepath

@@ -1,63 +1,30 @@
-import os
-import pytest
+#test_predict
 from src import predict
-import geopandas as gpd
-from src.models import multi_stage, dead
-from pytorch_lightning import Trainer
-import pandas as pd
-import cProfile
-import pstats
-from pytorch_lightning import Trainer
+from src.models import dead
+from skimage import io
 
-#Training module
-@pytest.fixture()
-def species_model_path(config, dm, ROOT, tmpdir):
-    config["batch_size"] = 16    
-    m  = multi_stage.MultiStage(train_df=dm.train, test_df=dm.test, crowns=dm.crowns, config=config)    
-    m.ROOT = "{}/tests/".format(ROOT)
-    trainer = Trainer(fast_dev_run=True)
-    trainer.fit(m)
-    trainer.save_checkpoint("{}/model.pl".format(tmpdir))
+#def test_dead_tree_model(dead_model_path, config, ROOT):
+    #m = dead.AliveDead.load_from_checkpoint(dead_model_path, config=config)
+    #m.eval()
+    #dead_tree = io.imread("{}/tests/data/dead_tree.png".format(ROOT))
+    #transform = dead.get_transform(augment=False)
+    #dead_tree_transformed = transform(dead_tree)
+    #score = m(dead_tree_transformed.unsqueeze(0)).detach()
+    ##assert np.argmax(score) == 1
     
-    return "{}/model.pl".format(tmpdir)
+    ##dead_tree = io.imread("{}/tests/data/dead_tree2.png".format(ROOT))
+    ##transform = dead.get_transform(augment=False)
+    ##dead_tree_transformed = transform(dead_tree)
+    ##score = m(dead_tree_transformed.unsqueeze(0)).detach()
+    ##assert np.argmax(score) == 1
     
-def test_predict_tile(species_model_path, config, ROOT, tmpdir):
-    rgb_path = "{}/tests/data/2019_D01_HARV_DP3_726000_4699000_image_crop_2019.tif".format(ROOT)
-    config["HSI_sensor_pool"] = "{}/tests/data/hsi/*.tif".format(ROOT)
+    ##alive_tree = io.imread("{}/tests/data/alive_tree.png".format(ROOT))
+    ##alive_tree = transform(alive_tree)
+    ##score = m(alive_tree.unsqueeze(0)).detach()
+    ##assert np.argmax(score) == 0
+    
+def test_predict_tile(species_model_path, config, ROOT):
+    PATH =  "{}/tests/data/2019_D01_HARV_DP3_726000_4699000_image_crop.tif".format(ROOT)
     config["CHM_pool"] = None
-    config["prediction_crop_dir"] = tmpdir    
-    
-    dead_model = dead.AliveDead(config)
-    trainer = Trainer(fast_dev_run=True)    
-    trainer.fit(dead_model)
-    dead_model_path = "{}/dead_model.pl".format(tmpdir)
-    trainer.save_checkpoint(dead_model_path)
-    
-    crowns = predict.find_crowns(rgb_path, config, dead_model_path=dead_model_path)
-    assert len(crowns.individual.unique()) == crowns.shape[0]
-        
-    crowns.to_file("{}/crowns.shp".format(tmpdir))
-    
-    crown_annotations_path = predict.generate_prediction_crops(crowns=crowns, config=config)
-    crown_annotations = gpd.read_file(crown_annotations_path)
-    
-    # Assert that the geometry is correctly mantained
-    assert crown_annotations.iloc[0].geometry.bounds == crowns[crowns.individual==crown_annotations.iloc[0].individual].iloc[0].geometry.bounds
-    
-    #There should be two of each individual, with the same geoemetry
-    assert crown_annotations[crown_annotations.individual == crown_annotations.iloc[0].individual].shape[0] == 2
-    assert len(crown_annotations[crown_annotations.individual == crown_annotations.iloc[0].individual].bounds.minx.unique()) == 1
-    
-    m = multi_stage.MultiStage.load_from_checkpoint(species_model_path, config=config)        
-    trainer = Trainer(fast_dev_run=False, max_steps=1, limit_val_batches=1)
-    
-    trees = predict.predict_tile(
-        crown_annotations=crown_annotations_path,
-        m=m,
-        trainer=trainer,
-        filter_dead=True,
-        savedir=tmpdir,
-        config=config)
-    
-    assert all([x in trees.columns for x in ["geometry","ens_score","ensembleTaxonID"]])
-    assert trees.iloc[0].geometry.bounds == trees[trees.individual==trees.iloc[0].individual].iloc[1].geometry.bounds
+    trees = predict.predict_tile(PATH, dead_model_path = None, species_model_path=species_model_path, config=config)
+    assert all([x in trees.columns for x in ["pred_taxa_top1","geometry","top1_score"]])

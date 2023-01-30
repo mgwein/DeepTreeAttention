@@ -24,7 +24,7 @@ git_commit=sys.argv[2]
 
 #Create datamodule
 config = data.read_config("config.yml")
-comet_logger = CometLogger(project_name="DeepTreeAttention2", workspace=config["comet_workspace"], auto_output_logging="simple")    
+comet_logger = CometLogger(project_name="DeepTreeAttention", workspace=config["comet_workspace"], auto_output_logging="simple")    
 
 #Generate new data or use previous run
 if config["use_data_commit"]:
@@ -55,34 +55,19 @@ if client:
 comet_logger.experiment.log_parameter("train_hash",hash_pandas_object(data_module.train))
 comet_logger.experiment.log_parameter("test_hash",hash_pandas_object(data_module.test))
 comet_logger.experiment.log_parameter("num_species",data_module.num_classes)
-comet_logger.experiment.log_table("train.csv", data_module.train)
+comet_logger.experiment.log_table("train_LIST2.csv", data_module.train)
 comet_logger.experiment.log_table("test.csv", data_module.test)
 
 if not config["use_data_commit"]:
     comet_logger.experiment.log_table("novel_species.csv", data_module.novel)
 
-train = data_module.train.copy()
-test = data_module.test.copy()
-crowns = data_module.crowns.copy()
+#Load from state dict of previous run
+model = Hang2020.spectral_network(bands=config["bands"], classes=data_module.num_classes)
 
-train["individual"] = train["individualID"]
-test["individual"] = test["individualID"]
-
-#remove graves
-train = train[~train.individual.str.contains("graves")].reset_index(drop=True)
-test = test[~test.individual.str.contains("graves")].reset_index(drop=True)
-
-m = multi_stage.MultiStage(train, test, config=data_module.config, crowns=crowns)
-
-#Save the train df for each level for inspection
-for index, train_df in enumerate([m.level_0_train,
-          m.level_1_train, m.level_2_train, m.level_3_train, m.level_4_train]):
-    comet_logger.experiment.log_table("train_level_{}.csv".format(index), train_df)
-
-#Save the train df for each level for inspection
-for index, test_df in enumerate([m.level_0_test,
-          m.level_1_test, m.level_2_test, m.level_3_test, m.level_4_test]):
-    comet_logger.experiment.log_table("test_level_{}.csv".format(index), test_df)
+#Loss weight, balanced
+loss_weight = []
+for x in data_module.species_label_dict:
+    loss_weight.append(1/data_module.train[data_module.train.taxonID==x].shape[0])
     
 #Create trainer
 lr_monitor = LearningRateMonitor(logging_interval='epoch')
@@ -100,23 +85,12 @@ trainer = Trainer(
 trainer.fit(m)
 
 #Save model checkpoint
-trainer.save_checkpoint("/blue/ewhite/b.weinstein/DeepTreeAttention/snapshots/{}.pt".format(comet_logger.experiment.id))
-
-# Prediction datasets are indexed by year, but full data is given to each model before ensembling
-print("Before prediction, the taxonID value counts")
-print(test.taxonID.value_counts())
-
-ds = data.TreeDataset(df=test, train=False, config=config)
-predictions = trainer.predict(m, dataloaders=m.predict_dataloader(ds))
-results = m.gather_predictions(predictions)
-results["individual"] = results["individual"]
-results_with_data = results.merge(crowns, on="individual")
-comet_logger.experiment.log_table("nested_predictions.csv", results_with_data)
-
-ensemble_df = m.ensemble(results)
-ensemble_df = m.evaluation_scores(
-    ensemble_df,
-    experiment=comet_logger.experiment
+trainer.save_checkpoint("/blue/ewhite/b.weinstein/DeepTreeAttention/snapshots/{}.pl".format(comet_logger.experiment.id))
+results = m.evaluate_crowns(
+    data_module.val_dataloader(),
+    crowns = data_module.crowns,
+    experiment=comet_logger.experiment,
+    points=data_module.canopy_points
 )
 
 #Log prediction
@@ -127,10 +101,6 @@ ensemble_df["pred_taxa_top1"] = ensemble_df.ensembleTaxonID
 ensemble_df["pred_label_top1"] = ensemble_df.ens_label
 rgb_pool = glob.glob(data_module.config["rgb_sensor_pool"], recursive=True)
 
-#Limit to 1 individual for confusion matrix
-ensemble_df = ensemble_df.reset_index(drop=True)
-ensemble_df = ensemble_df.groupby("individual").apply(lambda x: x.head(1))
-test = test.groupby("individual").apply(lambda x: x.head(1)).reset_index(drop=True)
 visualize.confusion_matrix(
     comet_experiment=comet_logger.experiment,
     results=ensemble_df,
@@ -140,3 +110,17 @@ visualize.confusion_matrix(
     test_points=data_module.canopy_points,
     rgb_pool=rgb_pool
 )
+
+#Log prediction
+comet_logger.experiment.log_table("test_predictions.csv", results)
+
+#Within site confusion
+site_lists = data_module.train.groupby("label").site.unique()
+within_site_confusion = metrics.site_confusion(y_true = results.label, y_pred = results.pred_label_top1, site_lists=site_lists)
+comet_logger.experiment.log_metric("within_site_confusion", within_site_confusion)
+
+#Within plot confusion
+plot_lists = data_module.train.groupby("label").plotID.unique()
+within_plot_confusion = metrics.site_confusion(y_true = results.label, y_pred = results.pred_label_top1, site_lists=plot_lists)
+comet_logger.experiment.log_metric("within_plot_confusion", within_plot_confusion)
+
